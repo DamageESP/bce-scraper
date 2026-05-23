@@ -318,3 +318,105 @@ input:focus {
   gap: 8px;
   margin-top: 12px;
 }
+
+.filters {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-bottom: 12px;
+  padding: 10px 12px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+.filter-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.filter-row-inline {
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+.filter-label {
+  font-size: 12px;
+  color: var(--muted);
+  font-weight: 600;
+}
+.filter-hint {
+  font-size: 11px;
+  color: var(--muted);
+}
+.role-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.chip {
+  font-size: 11px;
+  padding: 3px 10px;
+  border-radius: 12px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  color: var(--text);
+  cursor: pointer;
+  line-height: 1.4;
+}
+.chip:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+.chip.chip-active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: white;
+}
+.chip.chip-active:hover:not(:disabled) {
+  background: var(--accent-pressed);
+  border-color: var(--accent-pressed);
+}
+.discard-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  cursor: pointer;
+}
+.discard-toggle input[type="checkbox"] {
+  margin: 0;
+}
+
+.detail-block {
+  margin-top: 8px;
+  padding: 8px 10px;
+  border-left: 3px solid var(--accent);
+  background: var(--accent-bg);
+  border-radius: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: 12px;
+}
+.detail-line {
+  word-break: break-word;
+}
+.detail-line.muted {
+  color: var(--muted);
+}
+
+.result-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  align-items: stretch;
+}
+
+.result.discarded {
+  opacity: 0.55;
+  background: #fafafa;
+}
+.result.discarded .name {
+  text-decoration: line-through;
+  color: var(--muted);
+}

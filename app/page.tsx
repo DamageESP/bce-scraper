@@ -25,6 +25,19 @@ function latestBaja(hit: SearchHit): string | null {
   return dates.sort().reverse()[0];
 }
 
+function activeRolesOf(hit: SearchHit): string[] {
+  return (hit.roles ?? [])
+    .filter((r) => !r.fechaBajaRol && r.nombreRol)
+    .map((r) => r.nombreRol as string);
+}
+
+function normalizeStr(s: string): string {
+  return s
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[̀-ͯ]/g, "");
+}
+
 type SearchResponse = {
   numResultados: number;
   elementos: SearchHit[];
@@ -41,7 +54,42 @@ type CrmRow = {
   idelemento: number | null;
 };
 
+type EntityDetail = {
+  idelemento: number;
+  address: string | null;
+  localidad: string | null;
+  provincia: string | null;
+  codigoPostal: string | null;
+  phones: string[];
+  websites: string[];
+  administradores: string[];
+};
+
 const PAGE_SIZE = 20;
+const DISCARDED_KEY = "bde_discarded_v1";
+
+function loadDiscardedFromStorage(): Set<number> {
+  if (typeof window === "undefined") return new Set();
+  try {
+    const raw = window.localStorage.getItem(DISCARDED_KEY);
+    if (!raw) return new Set();
+    const arr = JSON.parse(raw);
+    if (!Array.isArray(arr)) return new Set();
+    return new Set(arr.filter((n) => typeof n === "number"));
+  } catch {
+    return new Set();
+  }
+}
+
+function saveDiscardedToStorage(ids: Set<number>) {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(
+      DISCARDED_KEY,
+      JSON.stringify(Array.from(ids)),
+    );
+  } catch {}
+}
 
 export default function HomePage() {
   const [query, setQuery] = useState("");
@@ -61,6 +109,27 @@ export default function HomePage() {
   const [toast, setToast] = useState<{ kind: "ok" | "error"; msg: string } | null>(
     null,
   );
+
+  // Per-record detail enrichment (localidad lives on /api/detail only).
+  const [details, setDetails] = useState<Map<number, EntityDetail>>(new Map());
+  const [detailLoadingIds, setDetailLoadingIds] = useState<Set<number>>(
+    new Set(),
+  );
+  const [detailErrors, setDetailErrors] = useState<Map<number, string>>(
+    new Map(),
+  );
+
+  // Discard list (localStorage).
+  const [discarded, setDiscarded] = useState<Set<number>>(new Set());
+  const [showDiscarded, setShowDiscarded] = useState(false);
+
+  // Filters.
+  const [localidadFilter, setLocalidadFilter] = useState("");
+  const [roleFilter, setRoleFilter] = useState<Set<string>>(new Set());
+
+  useEffect(() => {
+    setDiscarded(loadDiscardedFromStorage());
+  }, []);
 
   const showToast = useCallback((kind: "ok" | "error", msg: string) => {
     setToast({ kind, msg });
@@ -134,6 +203,86 @@ export default function HomePage() {
     runSearch(committedQuery, p);
   }
 
+  async function loadDetail(id: number) {
+    if (details.has(id) || detailLoadingIds.has(id)) return;
+    setDetailLoadingIds((s) => new Set(s).add(id));
+    setDetailErrors((m) => {
+      if (!m.has(id)) return m;
+      const next = new Map(m);
+      next.delete(id);
+      return next;
+    });
+    try {
+      const res = await fetch(`/api/detail/${id}`, { cache: "no-store" });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data?.error ?? `HTTP ${res.status}`);
+      setDetails((m) => {
+        const next = new Map(m);
+        next.set(id, {
+          idelemento: id,
+          address: data.address ?? null,
+          localidad: data.localidad ?? null,
+          provincia: data.provincia ?? null,
+          codigoPostal: data.codigoPostal ?? null,
+          phones: Array.isArray(data.phones) ? data.phones : [],
+          websites: Array.isArray(data.websites) ? data.websites : [],
+          administradores: Array.isArray(data.administradores)
+            ? data.administradores
+            : [],
+        });
+        return next;
+      });
+    } catch (e: any) {
+      setDetailErrors((m) => {
+        const next = new Map(m);
+        next.set(id, e?.message ?? "Error cargando detalle");
+        return next;
+      });
+    } finally {
+      setDetailLoadingIds((s) => {
+        const next = new Set(s);
+        next.delete(id);
+        return next;
+      });
+    }
+  }
+
+  function toggleDiscard(id: number) {
+    setDiscarded((s) => {
+      const next = new Set(s);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      saveDiscardedToStorage(next);
+      return next;
+    });
+  }
+
+  function clearAllDiscarded() {
+    if (
+      !confirm(
+        `¿Borrar los ${discarded.size} descarte(s) guardados en este navegador?`,
+      )
+    )
+      return;
+    const empty = new Set<number>();
+    setDiscarded(empty);
+    saveDiscardedToStorage(empty);
+  }
+
+  function toggleRoleFilter(name: string) {
+    setRoleFilter((s) => {
+      const next = new Set(s);
+      if (next.has(name)) next.delete(name);
+      else next.add(name);
+      return next;
+    });
+  }
+
+  function clearFilters() {
+    setLocalidadFilter("");
+    setRoleFilter(new Set());
+  }
+
   async function addToCrm(hit: SearchHit) {
     if (busyIds.has(hit.idelemento)) return;
     setBusyIds((s) => new Set(s).add(hit.idelemento));
@@ -201,6 +350,52 @@ export default function HomePage() {
 
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
 
+  // Roles present in the current page (active ones only), for the role chips.
+  const availableRoles = useMemo(() => {
+    const set = new Set<string>();
+    for (const hit of results ?? []) {
+      for (const r of activeRolesOf(hit)) set.add(r);
+    }
+    return Array.from(set).sort();
+  }, [results]);
+
+  const locFilterNorm = normalizeStr(localidadFilter.trim());
+
+  const filteredResults = useMemo(() => {
+    if (!results) return null;
+    return results.filter((hit) => {
+      if (!showDiscarded && discarded.has(hit.idelemento)) return false;
+      if (roleFilter.size > 0) {
+        const active = activeRolesOf(hit);
+        if (!active.some((r) => roleFilter.has(r))) return false;
+      }
+      if (locFilterNorm) {
+        const det = details.get(hit.idelemento);
+        if (!det) return true; // keep unenriched so user can decide to load
+        const haystack = normalizeStr(
+          [det.localidad, det.provincia, det.codigoPostal, det.address]
+            .filter(Boolean)
+            .join(" "),
+        );
+        if (!haystack.includes(locFilterNorm)) return false;
+      }
+      return true;
+    });
+  }, [results, showDiscarded, discarded, roleFilter, locFilterNorm, details]);
+
+  const discardedCountInResults = useMemo(() => {
+    if (!results) return 0;
+    return results.filter((h) => discarded.has(h.idelemento)).length;
+  }, [results, discarded]);
+
+  const hiddenByFilters =
+    results && filteredResults
+      ? results.length - filteredResults.length - (showDiscarded ? 0 : discardedCountInResults)
+      : 0;
+
+  const anyFilterActive =
+    localidadFilter.trim().length > 0 || roleFilter.size > 0;
+
   return (
     <div className="shell">
       <div className="header">
@@ -233,6 +428,78 @@ export default function HomePage() {
         )}
         {searchError && <div className="error">{searchError}</div>}
 
+        {results !== null && results.length > 0 && (
+          <div className="filters">
+            <div className="filter-row">
+              <label className="filter-label" htmlFor="localidad-filter">
+                Localidad / provincia
+              </label>
+              <input
+                id="localidad-filter"
+                type="search"
+                placeholder='Ej: "Málaga"'
+                value={localidadFilter}
+                onChange={(e) => setLocalidadFilter(e.target.value)}
+              />
+              <div className="filter-hint">
+                Filtra entre las fichas con detalle cargado. Las que no tengan
+                detalle siguen visibles para que las cargues si quieres.
+              </div>
+            </div>
+
+            {availableRoles.length > 0 && (
+              <div className="filter-row">
+                <div className="filter-label">Actividad (rol)</div>
+                <div className="role-chips">
+                  {availableRoles.map((r) => {
+                    const active = roleFilter.has(r);
+                    return (
+                      <button
+                        type="button"
+                        key={r}
+                        className={active ? "chip chip-active" : "chip"}
+                        onClick={() => toggleRoleFilter(r)}
+                        title={active ? "Quitar filtro" : "Filtrar por este rol"}
+                      >
+                        {r}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
+            <div className="filter-row filter-row-inline">
+              {anyFilterActive && (
+                <button type="button" onClick={clearFilters}>
+                  Limpiar filtros
+                </button>
+              )}
+              <label className="discard-toggle">
+                <input
+                  type="checkbox"
+                  checked={showDiscarded}
+                  onChange={(e) => setShowDiscarded(e.target.checked)}
+                />
+                Mostrar descartados
+                {discardedCountInResults > 0 && (
+                  <span className="muted"> ({discardedCountInResults} en esta página)</span>
+                )}
+              </label>
+              {discarded.size > 0 && (
+                <button
+                  type="button"
+                  className="danger"
+                  onClick={clearAllDiscarded}
+                  title="Borra todos los descartes guardados en este navegador"
+                >
+                  Borrar descartes ({discarded.size})
+                </button>
+              )}
+            </div>
+          </div>
+        )}
+
         {results === null ? (
           <div className="empty">Sin búsqueda todavía.</div>
         ) : results.length === 0 ? (
@@ -243,96 +510,221 @@ export default function HomePage() {
               <div className="muted">
                 {total.toLocaleString("es-ES")} resultado
                 {total === 1 ? "" : "s"} para "{committedQuery}"
+                {filteredResults && filteredResults.length !== results.length && (
+                  <>
+                    {" · "}
+                    {filteredResults.length} visibles tras filtros
+                  </>
+                )}
               </div>
             </div>
-            <div className="results">
-              {results.map((hit) => {
-                const nif =
-                  hit.documentos?.find((d) => d.tipoDocumento === "NIF")
-                    ?.numeroDocumento ?? null;
-                const already = inCrmByIdelemento.has(hit.idelemento);
-                const busy = busyIds.has(hit.idelemento);
-                const inactive = isHitInactive(hit);
-                const bajaDate = inactive ? latestBaja(hit) : null;
-                return (
-                  <div
-                    className={inactive ? "result inactive" : "result"}
-                    key={hit.idelemento}
-                  >
-                    <div>
-                      <div className="name">
-                        {hit.nombre}
-                        {inactive && (
-                          <span className="tag baja" title={`Dado de baja${bajaDate ? " el " + bajaDate : ""}`}>
-                            ⛔ Baja{bajaDate ? ` · ${bajaDate}` : ""}
-                          </span>
-                        )}
-                      </div>
-                      <div className="meta">
-                        {hit.tipoPersona === "J"
-                          ? "Empresa"
-                          : hit.tipoPersona === "F"
-                            ? "Persona física"
-                            : "—"}
-                        {nif ? ` · NIF ${nif}` : ""}
-                        {hit.codigoBE ? ` · BdE ${hit.codigoBE}` : ""}
-                        {" · "}
-                        <a
-                          href={`https://app.bde.es/rbe_spa/detalle/${hit.idelemento}`}
-                          target="_blank"
-                          rel="noreferrer"
-                        >
-                          ver ficha
-                        </a>
-                      </div>
-                      <div className="roles">
-                        {(hit.roles ?? []).map((r, i) =>
-                          r.nombreRol ? (
-                            <span
-                              className={
-                                r.fechaBajaRol ? "tag muted strike" : "tag"
-                              }
-                              key={i}
-                              title={
-                                r.fechaBajaRol
-                                  ? `Baja: ${r.fechaBajaRol}`
-                                  : undefined
-                              }
-                            >
-                              {r.nombreRol}
+            {filteredResults && filteredResults.length === 0 ? (
+              <div className="empty">
+                Ningún resultado pasa los filtros en esta página.
+                {hiddenByFilters > 0 && (
+                  <>
+                    {" "}
+                    <button type="button" onClick={clearFilters}>
+                      Limpiar filtros
+                    </button>
+                  </>
+                )}
+              </div>
+            ) : (
+              <div className="results">
+                {(filteredResults ?? []).map((hit) => {
+                  const nif =
+                    hit.documentos?.find((d) => d.tipoDocumento === "NIF")
+                      ?.numeroDocumento ?? null;
+                  const already = inCrmByIdelemento.has(hit.idelemento);
+                  const busy = busyIds.has(hit.idelemento);
+                  const inactive = isHitInactive(hit);
+                  const bajaDate = inactive ? latestBaja(hit) : null;
+                  const isDiscarded = discarded.has(hit.idelemento);
+                  const detail = details.get(hit.idelemento);
+                  const detailLoading = detailLoadingIds.has(hit.idelemento);
+                  const detailError = detailErrors.get(hit.idelemento);
+                  const className = [
+                    "result",
+                    inactive ? "inactive" : null,
+                    isDiscarded ? "discarded" : null,
+                  ]
+                    .filter(Boolean)
+                    .join(" ");
+                  return (
+                    <div className={className} key={hit.idelemento}>
+                      <div>
+                        <div className="name">
+                          {hit.nombre}
+                          {inactive && (
+                            <span className="tag baja" title={`Dado de baja${bajaDate ? " el " + bajaDate : ""}`}>
+                              ⛔ Baja{bajaDate ? ` · ${bajaDate}` : ""}
                             </span>
-                          ) : null,
+                          )}
+                          {isDiscarded && (
+                            <span className="tag muted" style={{ marginLeft: 8 }}>
+                              Descartado
+                            </span>
+                          )}
+                        </div>
+                        <div className="meta">
+                          {hit.tipoPersona === "J"
+                            ? "Empresa"
+                            : hit.tipoPersona === "F"
+                              ? "Persona física"
+                              : "—"}
+                          {nif ? ` · NIF ${nif}` : ""}
+                          {hit.codigoBE ? ` · BdE ${hit.codigoBE}` : ""}
+                          {" · "}
+                          <a
+                            href={`https://app.bde.es/rbe_spa/detalle/${hit.idelemento}`}
+                            target="_blank"
+                            rel="noreferrer"
+                          >
+                            ver ficha
+                          </a>
+                        </div>
+                        <div className="roles">
+                          {(hit.roles ?? []).map((r, i) =>
+                            r.nombreRol ? (
+                              <span
+                                className={
+                                  r.fechaBajaRol ? "tag muted strike" : "tag"
+                                }
+                                key={i}
+                                title={
+                                  r.fechaBajaRol
+                                    ? `Baja: ${r.fechaBajaRol}`
+                                    : undefined
+                                }
+                              >
+                                {r.nombreRol}
+                              </span>
+                            ) : null,
+                          )}
+                        </div>
+                        {detail && (
+                          <div className="detail-block">
+                            {detail.localidad || detail.provincia ? (
+                              <div className="detail-line">
+                                <strong>📍 </strong>
+                                {[detail.localidad, detail.provincia]
+                                  .filter(Boolean)
+                                  .join(", ")}
+                                {detail.codigoPostal ? ` (${detail.codigoPostal})` : ""}
+                              </div>
+                            ) : null}
+                            {detail.address && (
+                              <div className="detail-line muted">
+                                {detail.address}
+                              </div>
+                            )}
+                            {detail.phones.length > 0 && (
+                              <div className="detail-line">
+                                📞 {detail.phones.join(" · ")}
+                              </div>
+                            )}
+                            {detail.websites.length > 0 && (
+                              <div className="detail-line">
+                                {detail.websites.map((w, i) => (
+                                  <a
+                                    key={i}
+                                    href={w.startsWith("http") ? w : `https://${w}`}
+                                    target="_blank"
+                                    rel="noreferrer"
+                                    style={{ marginRight: 8 }}
+                                  >
+                                    {w}
+                                  </a>
+                                ))}
+                              </div>
+                            )}
+                            {detail.administradores.length > 0 && (
+                              <div className="detail-line muted">
+                                Admin: {detail.administradores.slice(0, 3).join(", ")}
+                                {detail.administradores.length > 3
+                                  ? ` (+${detail.administradores.length - 3})`
+                                  : ""}
+                              </div>
+                            )}
+                            {!detail.localidad &&
+                              !detail.provincia &&
+                              !detail.address && (
+                                <div className="detail-line muted">
+                                  Sin dirección registrada.
+                                </div>
+                              )}
+                          </div>
+                        )}
+                        {detailError && (
+                          <div className="error" style={{ marginTop: 6 }}>
+                            {detailError}{" "}
+                            <button
+                              type="button"
+                              onClick={() => loadDetail(hit.idelemento)}
+                            >
+                              Reintentar
+                            </button>
+                          </div>
                         )}
                       </div>
-                    </div>
-                    <div>
-                      <button
-                        className="primary"
-                        disabled={busy || already}
-                        onClick={() => addToCrm(hit)}
-                        title={
-                          inactive
-                            ? "Esta entidad ya no opera; aún se puede añadir como referencia"
-                            : undefined
-                        }
-                      >
-                        {busy ? (
-                          <>
-                            <span className="spinner" /> Añadiendo
-                          </>
-                        ) : already ? (
-                          "Ya en CRM"
-                        ) : inactive ? (
-                          "Añadir (baja)"
-                        ) : (
-                          "Añadir al CRM"
+                      <div className="result-actions">
+                        {!detail && !detailError && (
+                          <button
+                            type="button"
+                            onClick={() => loadDetail(hit.idelemento)}
+                            disabled={detailLoading}
+                            title="Carga la dirección, teléfonos y webs desde BdE"
+                          >
+                            {detailLoading ? (
+                              <>
+                                <span className="spinner" /> Cargando
+                              </>
+                            ) : (
+                              "📍 Cargar detalle"
+                            )}
+                          </button>
                         )}
-                      </button>
+                        <button
+                          className="primary"
+                          disabled={busy || already}
+                          onClick={() => addToCrm(hit)}
+                          title={
+                            inactive
+                              ? "Esta entidad ya no opera; aún se puede añadir como referencia"
+                              : undefined
+                          }
+                        >
+                          {busy ? (
+                            <>
+                              <span className="spinner" /> Añadiendo
+                            </>
+                          ) : already ? (
+                            "Ya en CRM"
+                          ) : inactive ? (
+                            "Añadir (baja)"
+                          ) : (
+                            "Añadir al CRM"
+                          )}
+                        </button>
+                        <button
+                          type="button"
+                          className={isDiscarded ? "" : "danger"}
+                          onClick={() => toggleDiscard(hit.idelemento)}
+                          title={
+                            isDiscarded
+                              ? "Quitar de descartados"
+                              : "Marcar como descartado (no se mostrará en futuras búsquedas en este navegador)"
+                          }
+                        >
+                          {isDiscarded ? "Restaurar" : "Descartar"}
+                        </button>
+                      </div>
                     </div>
-                  </div>
-                );
-              })}
-            </div>
+                  );
+                })}
+              </div>
+            )}
             {totalPages > 1 && (
               <div className="pagination">
                 <button

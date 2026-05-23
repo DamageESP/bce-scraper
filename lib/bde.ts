@@ -146,6 +146,9 @@ export type NormalizedEntity = {
   primaryPhone: string | null;
   administradores: string[];
   address: string | null;
+  localidad: string | null;
+  provincia: string | null;
+  codigoPostal: string | null;
   detalleUrl: string;
 };
 
@@ -220,6 +223,9 @@ export function normalizeDetail(d: BdeDetail): NormalizedEntity {
     primaryPhone: phones[0] ?? null,
     administradores,
     address: address || null,
+    localidad: addr.localidad ?? null,
+    provincia: addr.provincia ?? null,
+    codigoPostal: addr.codigoPostal ?? null,
     detalleUrl: `https://app.bde.es/rbe_spa/detalle/${d.idelemento}`,
   };
 }
