@@ -51,15 +51,27 @@ function normalize(s) {
     .replace(/[̀-ͯ]/g, "");
 }
 
+// Some BdE pages return transient 500s — empirically a 10-60 s pause often
+// clears them, while short retries do nothing. Longer schedule than the
+// usual exponential.
+const RETRY_DELAYS_MS = [5000, 10000, 20000, 40000, 60000, 60000];
+
 async function bdeFetch(path) {
   let lastErr;
-  for (let attempt = 0; attempt < 5; attempt++) {
+  for (let attempt = 0; attempt <= RETRY_DELAYS_MS.length; attempt++) {
     try {
       const res = await fetch(`${BASE_URL}${path}`, { headers: HEADERS });
-      if (res.status === 500 || res.status === 502 || res.status === 503 || res.status === 429) {
+      if (
+        res.status === 500 ||
+        res.status === 502 ||
+        res.status === 503 ||
+        res.status === 504 ||
+        res.status === 429
+      ) {
         lastErr = new Error(`${path} → HTTP ${res.status}`);
-        const backoff = 2 ** attempt * 1000;
-        console.warn(`  ! HTTP ${res.status}, retry in ${backoff / 1000}s`);
+        if (attempt === RETRY_DELAYS_MS.length) break;
+        const backoff = RETRY_DELAYS_MS[attempt];
+        console.warn(`  ! HTTP ${res.status} (attempt ${attempt + 1}), retry in ${backoff / 1000}s`);
         await sleep(backoff);
         continue;
       }
@@ -70,8 +82,9 @@ async function bdeFetch(path) {
       return res.json();
     } catch (e) {
       lastErr = e;
-      const backoff = 2 ** attempt * 1000;
-      console.warn(`  ! ${e.message}, retry in ${backoff / 1000}s`);
+      if (attempt === RETRY_DELAYS_MS.length) break;
+      const backoff = RETRY_DELAYS_MS[attempt];
+      console.warn(`  ! ${e.message} (attempt ${attempt + 1}), retry in ${backoff / 1000}s`);
       await sleep(backoff);
     }
   }
@@ -97,12 +110,33 @@ async function enumerateAll() {
     return cached;
   }
   const found = new Map(); // idelemento -> search hit
+  const skipped = []; // {q, page} for pages that exhausted retries
   for (const q of ENUM_QUERIES) {
     let page = 1;
     let total = null;
     while (true) {
-      const path = `/elementos?q=${encodeURIComponent(q)}&sort=nombre&sort_order=ASC&lang=ES&page=${page}&page_size=${PAGE_SIZE}`;
-      const data = await bdeFetch(path);
+      // sort=idelemento is far more reliable than sort=nombre on deep pages.
+      const path = `/elementos?q=${encodeURIComponent(q)}&sort=idelemento&sort_order=ASC&lang=ES&page=${page}&page_size=${PAGE_SIZE}`;
+      let data;
+      try {
+        data = await bdeFetch(path);
+      } catch (e) {
+        console.warn(`  ✗ giving up on q="${q}" page=${page}: ${e.message}`);
+        skipped.push({ q, page });
+        // Don't break — try the next page; failures appear to be per-offset
+        // and other pages may work. Estimate total from prior pages if we
+        // already have it; otherwise assume there might be more.
+        if (total !== null) {
+          const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
+          if (page >= totalPages) break;
+        } else if (page >= 30) {
+          // Safety bound when total is unknown after first-page failure.
+          break;
+        }
+        page++;
+        await sleep(DELAY_MS);
+        continue;
+      }
       if (total === null) total = data.numResultados ?? 0;
       const hits = data.elementos ?? [];
       let newCount = 0;
@@ -124,6 +158,10 @@ async function enumerateAll() {
   }
   const arr = Array.from(found.values());
   await writeJson(CANDIDATES_PATH, arr);
+  if (skipped.length > 0) {
+    await writeJson(`${OUT_DIR}/skipped-pages.json`, skipped);
+    console.warn(`[enum] skipped ${skipped.length} page(s) after exhausting retries; dedup across letters usually compensates.`);
+  }
   console.log(`[enum] done: ${arr.length} unique entities saved to ${CANDIDATES_PATH}`);
   return arr;
 }
