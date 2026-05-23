@@ -30,8 +30,8 @@ const HEADERS = {
 
 const TARGET_ROLE = "Intermediario de crédito inmobiliario";
 const TARGET_PROVINCIA = "malaga"; // accent-stripped, lowercased
-const DELAY_MS = 1200;
-const PAGE_SIZE = 300;
+const DELAY_MS = 2000;
+const PAGE_SIZE = 100;
 const ENUM_QUERIES = "0123456789abcdefghijklmnopqrstuvwxyzñ".split("");
 
 const OUT_DIR = "scripts/output";
