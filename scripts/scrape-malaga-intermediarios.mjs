@@ -103,19 +103,40 @@ async function writeJson(path, data) {
   await fs.writeFile(path, JSON.stringify(data, null, 2));
 }
 
+const ENUM_STATE_PATH = `${OUT_DIR}/enum-state.json`;
+const SATURATION_STREAK = 3; // stop after N consecutive queries with 0 new entities
+
 async function enumerateAll() {
-  const cached = await readJson(CANDIDATES_PATH);
-  if (cached) {
-    console.log(`[enum] cache hit: ${cached.length} entities from ${CANDIDATES_PATH}`);
-    return cached;
+  const finalized = await readJson(CANDIDATES_PATH);
+  if (finalized) {
+    console.log(`[enum] cache hit: ${finalized.length} entities from ${CANDIDATES_PATH}`);
+    return finalized;
   }
-  const found = new Map(); // idelemento -> search hit
-  const skipped = []; // {q, page} for pages that exhausted retries
+  // Resume from incremental state if present.
+  const state = (await readJson(ENUM_STATE_PATH)) ?? {
+    found: [],
+    doneQueries: [],
+    skipped: [],
+    zeroStreak: 0,
+  };
+  const found = new Map(state.found.map((h) => [h.idelemento, h]));
+  const doneQueries = new Set(state.doneQueries);
+  const skipped = state.skipped;
+  let zeroStreak = state.zeroStreak ?? 0;
+  if (found.size > 0) {
+    console.log(`[enum] resume: ${found.size} entities, ${doneQueries.size} queries done, streak=${zeroStreak}`);
+  }
+
   for (const q of ENUM_QUERIES) {
+    if (doneQueries.has(q)) continue;
+    if (zeroStreak >= SATURATION_STREAK) {
+      console.log(`[enum] saturated (${zeroStreak} consecutive queries added nothing); stopping enumeration.`);
+      break;
+    }
+    const before = found.size;
     let page = 1;
     let total = null;
     while (true) {
-      // sort=idelemento is far more reliable than sort=nombre on deep pages.
       const path = `/elementos?q=${encodeURIComponent(q)}&sort=idelemento&sort_order=ASC&lang=ES&page=${page}&page_size=${PAGE_SIZE}`;
       let data;
       try {
@@ -123,14 +144,10 @@ async function enumerateAll() {
       } catch (e) {
         console.warn(`  ✗ giving up on q="${q}" page=${page}: ${e.message}`);
         skipped.push({ q, page });
-        // Don't break — try the next page; failures appear to be per-offset
-        // and other pages may work. Estimate total from prior pages if we
-        // already have it; otherwise assume there might be more.
         if (total !== null) {
           const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
           if (page >= totalPages) break;
         } else if (page >= 30) {
-          // Safety bound when total is unknown after first-page failure.
           break;
         }
         page++;
@@ -154,6 +171,20 @@ async function enumerateAll() {
       page++;
       await sleep(DELAY_MS);
     }
+    doneQueries.add(q);
+    const addedThisQuery = found.size - before;
+    if (addedThisQuery === 0) {
+      zeroStreak++;
+    } else {
+      zeroStreak = 0;
+    }
+    // Checkpoint after every query.
+    await writeJson(ENUM_STATE_PATH, {
+      found: Array.from(found.values()),
+      doneQueries: Array.from(doneQueries),
+      skipped,
+      zeroStreak,
+    });
     await sleep(DELAY_MS);
   }
   const arr = Array.from(found.values());
