@@ -420,3 +420,25 @@ input:focus {
   text-decoration: line-through;
   color: var(--muted);
 }
+
+/* --- Lead enrichment (ICP tier badges) --- */
+.tag.tier {
+  margin-left: 8px;
+  font-weight: 600;
+}
+.tag.tier-a {
+  background: rgba(21, 128, 61, 0.14);
+  color: #15803d;
+}
+.tag.tier-b {
+  background: rgba(161, 98, 7, 0.14);
+  color: #a16207;
+}
+.tag.tier-c {
+  background: rgba(194, 65, 12, 0.14);
+  color: #c2410c;
+}
+.tag.tier-d {
+  background: rgba(185, 28, 28, 0.12);
+  color: var(--danger);
+}

@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 type SearchHit = {
   idelemento: number;
@@ -52,6 +52,10 @@ type CrmRow = {
   telefono: string | null;
   url: string;
   idelemento: number | null;
+  icpScore: number | null;
+  icpTier: string | null;
+  resumenIa: string | null;
+  enriquecido: string | null;
 };
 
 type EntityDetail = {
@@ -106,6 +110,13 @@ export default function HomePage() {
 
   const [busyIds, setBusyIds] = useState<Set<number>>(new Set());
   const [deletingIds, setDeletingIds] = useState<Set<string>>(new Set());
+  const [enrichingIds, setEnrichingIds] = useState<Set<string>>(new Set());
+  const [bulkProgress, setBulkProgress] = useState<{
+    done: number;
+    total: number;
+    current: string;
+  } | null>(null);
+  const bulkCancelRef = useRef(false);
   const [toast, setToast] = useState<{ kind: "ok" | "error"; msg: string } | null>(
     null,
   );
@@ -342,6 +353,89 @@ export default function HomePage() {
     }
   }
 
+  // Warn before closing the tab while a bulk enrichment is running.
+  useEffect(() => {
+    if (!bulkProgress) return;
+    const handler = (e: BeforeUnloadEvent) => {
+      e.preventDefault();
+      e.returnValue = "";
+    };
+    window.addEventListener("beforeunload", handler);
+    return () => window.removeEventListener("beforeunload", handler);
+  }, [bulkProgress]);
+
+  const enrichOne = useCallback(
+    async (row: CrmRow): Promise<boolean> => {
+      setEnrichingIds((s) => new Set(s).add(row.id));
+      try {
+        const res = await fetch(`/api/enrich/${row.id}`, { method: "POST" });
+        const data = (await res.json().catch(() => ({}))) as {
+          ok?: boolean;
+          icp?: { tier: string; score: number; nota: string | null };
+          confianza?: string;
+          error?: string;
+        };
+        if (!res.ok || !data.ok) throw new Error(data.error ?? `HTTP ${res.status}`);
+        const icp = data.icp!;
+        showToast(
+          "ok",
+          `${row.nombre || row.empresa}: ${icp.tier} · ${icp.score}/100 (confianza ${data.confianza ?? "?"})${icp.nota ? ` · ${icp.nota}` : ""}`,
+        );
+        return true;
+      } catch (e: any) {
+        showToast("error", `${row.nombre || row.empresa}: ${e?.message ?? "Error"}`);
+        return false;
+      } finally {
+        setEnrichingIds((s) => {
+          const next = new Set(s);
+          next.delete(row.id);
+          return next;
+        });
+      }
+    },
+    [showToast],
+  );
+
+  async function enrichRow(row: CrmRow) {
+    if (enrichingIds.has(row.id) || bulkProgress) return;
+    await enrichOne(row);
+    refreshCrm();
+  }
+
+  async function enrichPending() {
+    if (bulkProgress) return;
+    const pending = (crm ?? []).filter((r) => !r.icpTier);
+    if (pending.length === 0) return;
+    if (
+      !confirm(
+        `¿Enriquecer ${pending.length} lead(s) pendientes? Tarda 1-3 min por lead y consume API de Anthropic.`,
+      )
+    )
+      return;
+    bulkCancelRef.current = false;
+    let ok = 0;
+    // Sequential on purpose: each lead gets its own serverless invocation and
+    // the loop naturally throttles Notion + Anthropic.
+    for (let i = 0; i < pending.length; i++) {
+      if (bulkCancelRef.current) break;
+      const row = pending[i];
+      setBulkProgress({
+        done: i,
+        total: pending.length,
+        current: row.nombre || row.empresa,
+      });
+      if (await enrichOne(row)) ok++;
+    }
+    setBulkProgress(null);
+    showToast(
+      bulkCancelRef.current ? "ok" : ok > 0 ? "ok" : "error",
+      bulkCancelRef.current
+        ? `Bulk cancelado: ${ok} enriquecidos (los completados se conservan).`
+        : `Bulk terminado: ${ok}/${pending.length} enriquecidos.`,
+    );
+    refreshCrm();
+  }
+
   async function logout() {
     document.cookie =
       "bde_crm_session=; Max-Age=0; Path=/; SameSite=Lax; Secure";
@@ -395,6 +489,8 @@ export default function HomePage() {
 
   const anyFilterActive =
     localidadFilter.trim().length > 0 || roleFilter.size > 0;
+
+  const pendingEnrichCount = (crm ?? []).filter((r) => !r.icpTier).length;
 
   return (
     <div className="shell">
@@ -751,10 +847,29 @@ export default function HomePage() {
       <section className="card">
         <div className="toolbar">
           <h2 style={{ margin: 0 }}>CRM actual</h2>
-          <button onClick={refreshCrm} disabled={crmLoading}>
-            {crmLoading ? "Cargando…" : "Refrescar"}
-          </button>
+          <div style={{ display: "flex", gap: 8 }}>
+            {pendingEnrichCount > 0 && !bulkProgress && (
+              <button onClick={enrichPending} title="Enriquece secuencialmente todos los leads sin ICP Tier">
+                ✨ Enriquecer pendientes ({pendingEnrichCount})
+              </button>
+            )}
+            {bulkProgress && (
+              <button className="danger" onClick={() => (bulkCancelRef.current = true)}>
+                Cancelar bulk
+              </button>
+            )}
+            <button onClick={refreshCrm} disabled={crmLoading}>
+              {crmLoading ? "Cargando…" : "Refrescar"}
+            </button>
+          </div>
         </div>
+        {bulkProgress && (
+          <div className="ok">
+            Enriqueciendo {bulkProgress.done + 1}/{bulkProgress.total}:{" "}
+            {bulkProgress.current}…{" "}
+            <span className="spinner" />
+          </div>
+        )}
         {crmError && <div className="error">{crmError}</div>}
         {crm === null ? (
           <div className="empty">Cargando…</div>
@@ -762,35 +877,69 @@ export default function HomePage() {
           <div className="empty">Sin filas en el CRM.</div>
         ) : (
           <div className="results">
-            {crm.map((row) => (
-              <div className="crm-row" key={row.id}>
-                <div>
-                  <div className="name">
-                    <a href={row.url} target="_blank" rel="noreferrer">
-                      {row.nombre || "(sin nombre)"}
-                    </a>
-                  </div>
-                  <div className="meta">
-                    {row.estado && (
-                      <span className="tag muted" style={{ marginRight: 6 }}>
-                        {row.estado}
-                      </span>
+            {crm.map((row) => {
+              const enriching = enrichingIds.has(row.id);
+              return (
+                <div className="crm-row" key={row.id}>
+                  <div>
+                    <div className="name">
+                      <a href={row.url} target="_blank" rel="noreferrer">
+                        {row.nombre || "(sin nombre)"}
+                      </a>
+                      {row.icpTier && (
+                        <span
+                          className={`tag tier tier-${row.icpTier.toLowerCase()}`}
+                          title={
+                            row.enriquecido
+                              ? `Enriquecido el ${row.enriquecido}`
+                              : undefined
+                          }
+                        >
+                          {row.icpTier}
+                          {row.icpScore != null ? ` · ${row.icpScore}` : ""}
+                        </span>
+                      )}
+                    </div>
+                    <div className="meta">
+                      {row.estado && (
+                        <span className="tag muted" style={{ marginRight: 6 }}>
+                          {row.estado}
+                        </span>
+                      )}
+                      {row.telefono ? `📞 ${row.telefono}` : "sin teléfono"}
+                      {row.idelemento ? ` · BdE#${row.idelemento}` : ""}
+                    </div>
+                    {row.resumenIa && (
+                      <div className="meta muted">{row.resumenIa}</div>
                     )}
-                    {row.telefono ? `📞 ${row.telefono}` : "sin teléfono"}
-                    {row.idelemento ? ` · BdE#${row.idelemento}` : ""}
+                  </div>
+                  <div className="result-actions">
+                    <button
+                      disabled={enriching || !!bulkProgress}
+                      onClick={() => enrichRow(row)}
+                      title="Investiga la empresa con IA y escribe el ICP + call prep en Notion (1-3 min)"
+                    >
+                      {enriching ? (
+                        <>
+                          <span className="spinner" /> Enriqueciendo
+                        </>
+                      ) : row.icpTier ? (
+                        "Re-enriquecer"
+                      ) : (
+                        "✨ Enriquecer"
+                      )}
+                    </button>
+                    <button
+                      className="danger"
+                      disabled={deletingIds.has(row.id)}
+                      onClick={() => removeFromCrm(row)}
+                    >
+                      {deletingIds.has(row.id) ? "Eliminando…" : "Eliminar"}
+                    </button>
                   </div>
                 </div>
-                <div>
-                  <button
-                    className="danger"
-                    disabled={deletingIds.has(row.id)}
-                    onClick={() => removeFromCrm(row)}
-                  >
-                    {deletingIds.has(row.id) ? "Eliminando…" : "Eliminar"}
-                  </button>
-                </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         )}
       </section>
