@@ -63,8 +63,12 @@ the `APP_PASSWORD`, and start searching.
 - `POST /api/notion/add` (body `{ "idelemento": <id> }`) fetches the
   entity detail from BdE, normalises it (address, phone, NIF/LEI,
   websites, administrators, baja date) and creates a Notion page in
-  the CRM data source with `Estado=Prospecto` and `Teléfono` set from
-  `roles[*].telefonos`.
+  the CRM data source with `Estado=Prospecto`, `Teléfono` set from
+  `roles[*].telefonos`, and `Provincia` (a Select) set from the BdE
+  address. The `Provincia` property is created on the data source
+  automatically the first time a prospect is added, so the CRM can be
+  filtered/grouped by province. If the integration lacks permission to
+  update the schema, the prospect is still created without it.
 - `GET /api/notion/list` returns the current CRM rows for the side
   panel.
 - `DELETE /api/notion/<pageId>` archives a CRM row.
@@ -82,6 +86,40 @@ The Notion token never leaves the server.
   spaces. The UI mirrors that validation client-side and the server
   re-checks it.
 
+## Bulk scraper (`scripts/scrape-intermediarios.mjs`)
+
+For pulling a whole province's worth of "Intermediario de crédito
+inmobiliario" entities at once (rather than adding them one-by-one in
+the UI), there's a standalone Node script:
+
+```bash
+node scripts/scrape-intermediarios.mjs madrid
+# or
+TARGET_PROVINCIA=malaga DELAY_MS=2000 node scripts/scrape-intermediarios.mjs
+```
+
+The province is matched accent-insensitively against the BdE
+`provincia`/`localidad` fields. Output goes to `scripts/output/`
+(git-ignored):
+
+- `<provincia>-intermediarios.json` — the matched entities.
+- `<provincia>-progress.json` — resumable phase-2 progress.
+
+Because the BdE search API has **no** server-side role or locality
+filter (unknown query params are rejected), the script enumerates the
+entire registry by iterating single-letter `q` queries, dedupes by
+`idelemento`, then fetches each `Intermediario` candidate's detail to
+read its province. That enumeration is province-independent, so it's
+cached in `scripts/output/all-candidates.json` and reused across
+provinces — the first run is slow (the full registry is tens of
+thousands of entities and BdE throttles sustained requests with
+transient 500s, which the script retries through), but a second
+province only re-runs the fast phase-2 filter.
+
+Everything is checkpointed after every query/batch, so a long run can
+be stopped and resumed. `DELAY_MS` (default 2000) tunes the polite
+delay between sequential requests.
+
 ## File layout
 
     app/
@@ -97,5 +135,7 @@ The Notion token never leaves the server.
     lib/
       auth.ts    HMAC session cookie (Web Crypto, runs on Edge)
       bde.ts    BdE client + normaliser (incl. fechaBajaRol → inactive)
-      notion.ts  Notion client (list / create / archive)
+      notion.ts  Notion client (list / create + Provincia prop / archive)
+    scripts/
+      scrape-intermediarios.mjs     bulk per-province scraper (see above)
     middleware.ts                   gates everything behind the cookie

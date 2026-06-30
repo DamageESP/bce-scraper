@@ -98,6 +98,45 @@ export async function listCrm(limit = 100): Promise<CrmRow[]> {
   return rows;
 }
 
+// Name of the structured CRM property that holds the BdE province. Kept as a
+// Select so the CRM can filter/group prospects by province (e.g. "show me all
+// Madrid prospects"). Notion auto-creates the option the first time a value is
+// written, so we don't need to predefine the list.
+const PROVINCIA_PROP = "Provincia";
+
+// Resolves once we know the Provincia property exists on the data source:
+// `true`  → safe to set it on new pages.
+// `false` → schema couldn't be updated; skip it so page creation still works.
+let provinciaPropReady: Promise<boolean> | null = null;
+
+// Idempotently ensure the data source has a "Provincia" Select property.
+// Notion's data source schema API (2025-09-03) lets us add a property without
+// touching existing rows. Cached for the life of the server process. If the
+// integration lacks "update database" permission, we degrade gracefully:
+// the prospect is still created, just without the structured province.
+async function ensureProvinciaProperty(): Promise<boolean> {
+  if (!provinciaPropReady) {
+    provinciaPropReady = (async () => {
+      try {
+        const ds = await notionFetch(`/data_sources/${DATA_SOURCE_ID}`);
+        if (ds?.properties?.[PROVINCIA_PROP]) return true;
+        await notionFetch(`/data_sources/${DATA_SOURCE_ID}`, {
+          method: "PATCH",
+          body: { properties: { [PROVINCIA_PROP]: { select: {} } } },
+        });
+        return true;
+      } catch (e) {
+        console.warn(
+          `Notion: could not ensure "${PROVINCIA_PROP}" property; ` +
+            `prospects will be created without it. ${(e as Error).message}`,
+        );
+        return false;
+      }
+    })();
+  }
+  return provinciaPropReady;
+}
+
 function paragraph(content: string) {
   return {
     object: "block",
@@ -158,6 +197,9 @@ export async function createProspect(ent: NormalizedEntity): Promise<{
   };
   if (ent.primaryPhone) {
     properties["Teléfono"] = { phone_number: ent.primaryPhone };
+  }
+  if (ent.provincia && (await ensureProvinciaProperty())) {
+    properties[PROVINCIA_PROP] = { select: { name: ent.provincia } };
   }
 
   const created = await notionFetch(`/pages`, {

@@ -1,14 +1,23 @@
 #!/usr/bin/env node
 // Scrape every "Intermediario de crédito inmobiliario" entity from the
-// Banco de España Registro de Entidades that's located in Málaga province.
+// Banco de España Registro de Entidades that's located in a given province.
+//
+//   node scripts/scrape-intermediarios.mjs <provincia>
+//   node scripts/scrape-intermediarios.mjs madrid
+//   TARGET_PROVINCIA=malaga DELAY_MS=2000 node scripts/scrape-intermediarios.mjs
 //
 // The BdE search endpoint only takes a `q` text query and pagination; it
-// does NOT support filtering by role or locality. So this script:
+// does NOT support filtering by role or locality (unknown params are
+// rejected outright). So this script:
 //   1. Enumerates every entity by iterating single-letter `q` queries
 //      (a-z, ñ, 0-9), deduping by idelemento. Each search hit already
 //      includes `roles`, so we filter to the target role straight away.
 //   2. For each candidate, fetches the detail to read direccion.provincia.
-//   3. Writes matches to scripts/output/malaga-intermediarios.json.
+//   3. Writes matches to scripts/output/<provincia>-intermediarios.json.
+//
+// The enumeration (phase 1) is province-independent, so its output is
+// shared across provinces — once you've enumerated for Málaga, a Madrid
+// run reuses the same all-candidates.json and only re-does phase 2.
 //
 // All requests are sequential, with a configurable delay between them,
 // so BdE never sees more than one in-flight request from this script.
@@ -28,27 +37,47 @@ const HEADERS = {
   "Accept-Language": "es-ES,es;q=0.9",
 };
 
-const TARGET_ROLE = "Intermediario de crédito inmobiliario";
-const TARGET_PROVINCIA = "malaga"; // accent-stripped, lowercased
-const DELAY_MS = 2000;
-const PAGE_SIZE = 100;
-const ENUM_QUERIES = "0123456789abcdefghijklmnopqrstuvwxyzñ".split("");
-
-const OUT_DIR = "scripts/output";
-const CANDIDATES_PATH = `${OUT_DIR}/all-candidates.json`;
-const INTERMEDIARIOS_PATH = `${OUT_DIR}/intermediarios-all.json`;
-const RESULTS_PATH = `${OUT_DIR}/malaga-intermediarios.json`;
-const PROGRESS_PATH = `${OUT_DIR}/progress.json`;
-
-function sleep(ms) {
-  return new Promise((r) => setTimeout(r, ms));
-}
-
 function normalize(s) {
   return (s || "")
     .toLowerCase()
     .normalize("NFD")
     .replace(/[̀-ͯ]/g, "");
+}
+
+// Target province: first CLI arg, or TARGET_PROVINCIA env, accent-stripped
+// and lowercased for matching against BdE's provincia/localidad fields.
+const PROVINCIA_INPUT = process.argv[2] ?? process.env.TARGET_PROVINCIA ?? "";
+const TARGET_PROVINCIA = normalize(PROVINCIA_INPUT).trim();
+if (!TARGET_PROVINCIA) {
+  console.error(
+    "Usage: node scripts/scrape-intermediarios.mjs <provincia>\n" +
+      "   or: TARGET_PROVINCIA=<provincia> node scripts/scrape-intermediarios.mjs\n" +
+      "Example: node scripts/scrape-intermediarios.mjs madrid",
+  );
+  process.exit(1);
+}
+// Filesystem-safe slug for the province (e.g. "madrid", "las-palmas").
+const PROVINCIA_SLUG = TARGET_PROVINCIA.replace(/[^a-z0-9]+/g, "-").replace(
+  /^-+|-+$/g,
+  "",
+);
+
+const TARGET_ROLE = "Intermediario de crédito inmobiliario";
+const DELAY_MS = Number(process.env.DELAY_MS ?? 2000);
+const PAGE_SIZE = 100;
+const ENUM_QUERIES = "0123456789abcdefghijklmnopqrstuvwxyzñ".split("");
+
+const OUT_DIR = "scripts/output";
+// Province-independent (shared across provinces): enumeration + role filter.
+const CANDIDATES_PATH = `${OUT_DIR}/all-candidates.json`;
+const INTERMEDIARIOS_PATH = `${OUT_DIR}/intermediarios-all.json`;
+const ENUM_STATE_PATH = `${OUT_DIR}/enum-state.json`;
+// Province-specific: the matches and the resumable phase-2 progress.
+const RESULTS_PATH = `${OUT_DIR}/${PROVINCIA_SLUG}-intermediarios.json`;
+const PROGRESS_PATH = `${OUT_DIR}/${PROVINCIA_SLUG}-progress.json`;
+
+function sleep(ms) {
+  return new Promise((r) => setTimeout(r, ms));
 }
 
 // Some BdE pages return transient 500s — empirically a 10-60 s pause often
@@ -103,7 +132,6 @@ async function writeJson(path, data) {
   await fs.writeFile(path, JSON.stringify(data, null, 2));
 }
 
-const ENUM_STATE_PATH = `${OUT_DIR}/enum-state.json`;
 const SATURATION_STREAK = 3; // stop after N consecutive queries with 0 new entities
 
 async function enumerateAll() {
@@ -247,6 +275,7 @@ async function loadProgress() {
 
 async function main() {
   await fs.mkdir(OUT_DIR, { recursive: true });
+  console.log(`[target] provincia="${PROVINCIA_INPUT}" (match="${TARGET_PROVINCIA}"), delay=${DELAY_MS}ms`);
 
   console.log(`[phase 1] enumerate every BdE entity (this is the slow bit)…`);
   const all = await enumerateAll();
@@ -276,8 +305,8 @@ async function main() {
     processed.add(hit.idelemento);
     const provNorm = normalize(detail.direccion?.provincia);
     const locNorm = normalize(detail.direccion?.localidad);
-    const isMalaga = provNorm.includes(TARGET_PROVINCIA) || locNorm.includes(TARGET_PROVINCIA);
-    if (isMalaga) {
+    const isMatch = provNorm.includes(TARGET_PROVINCIA) || locNorm.includes(TARGET_PROVINCIA);
+    if (isMatch) {
       const row = summarizeDetail(hit, detail);
       matches.push(row);
       nonMatchStreak = 0;
@@ -288,7 +317,7 @@ async function main() {
       nonMatchStreak++;
       if (nonMatchStreak % 25 === 0) {
         console.log(
-          `  · ${i}/${intermediarios.length} processed (last match streak: ${nonMatchStreak} non-Málaga; total matches so far: ${matches.length})`,
+          `  · ${i}/${intermediarios.length} processed (last match streak: ${nonMatchStreak} non-${PROVINCIA_INPUT}; total matches so far: ${matches.length})`,
         );
       }
     }
@@ -307,7 +336,7 @@ async function main() {
   });
   await writeJson(RESULTS_PATH, matches);
   console.log("");
-  console.log(`[done] ${matches.length} entities in Málaga`);
+  console.log(`[done] ${matches.length} entities in ${PROVINCIA_INPUT}`);
   console.log(`[done] results: ${RESULTS_PATH}`);
 }
 
