@@ -63,7 +63,12 @@ const PROVINCIA_SLUG = TARGET_PROVINCIA.replace(/[^a-z0-9]+/g, "-").replace(
 );
 
 const TARGET_ROLE = "Intermediario de crédito inmobiliario";
-const DELAY_MS = Number(process.env.DELAY_MS ?? 2000);
+// The BdE backend is fragile and starts returning 500s when hit too fast — it's
+// the server buckling under load, not IP throttling. A generous gap between
+// sequential calls keeps it healthy, so requests succeed first-try instead of
+// burning long retry backoffs; gentler usually ends up *faster* overall. Tune
+// with DELAY_MS if needed.
+const DELAY_MS = Number(process.env.DELAY_MS ?? 6000);
 const PAGE_SIZE = 100;
 const ENUM_QUERIES = "0123456789abcdefghijklmnopqrstuvwxyzñ".split("");
 
@@ -80,10 +85,10 @@ function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-// Some BdE pages return transient 500s — empirically a 10-60 s pause often
-// clears them, while short retries do nothing. Longer schedule than the
-// usual exponential.
-const RETRY_DELAYS_MS = [5000, 10000, 20000, 40000, 60000, 60000];
+// Some BdE pages return transient 500s when the backend is overloaded —
+// empirically a generous pause lets it recover, while short retries do nothing
+// (they just pile more load on a struggling server). Long, patient schedule.
+const RETRY_DELAYS_MS = [15000, 30000, 45000, 60000, 90000, 120000];
 
 async function bdeFetch(path) {
   let lastErr;
