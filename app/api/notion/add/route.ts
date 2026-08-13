@@ -34,6 +34,7 @@ export async function POST(req: Request) {
         url: created.url,
         nombre: normalized.nombre,
         telefono: normalized.primaryPhone,
+        web: normalized.primaryWebsite,
         idelemento: normalized.idelemento,
       },
       entity: normalized,

@@ -64,11 +64,17 @@ the `APP_PASSWORD`, and start searching.
   entity detail from BdE, normalises it (address, phone, NIF/LEI,
   websites, administrators, baja date) and creates a Notion page in
   the CRM data source with `Estado=Prospecto`, `Teléfono` set from
-  `roles[*].telefonos`, and `Provincia` (a Select) set from the BdE
-  address. The `Provincia` property is created on the data source
-  automatically the first time a prospect is added, so the CRM can be
-  filtered/grouped by province. If the integration lacks permission to
-  update the schema, the prospect is still created without it.
+  `roles[*].telefonos`, `Provincia` (a Select) set from the BdE
+  address, and `Web` (a URL) set from `roles[*].paginaWeb` when the
+  entity has one. BdE stores the site as free text, so it's normalised
+  first (`www.foo.es` → `https://www.foo.es`) and anything that isn't a
+  web address — `no tiene`, a bare `-`, an e-mail — is dropped rather
+  than written as a broken link. The `Provincia` and `Web` properties
+  are created on the data source automatically the first time a
+  prospect is added, so the CRM can be filtered/grouped by province and
+  the company site is one click from the row. If the integration lacks
+  permission to update the schema, the prospect is still created
+  without them.
 - `GET /api/notion/list` returns the current CRM rows for the side
   panel.
 - `DELETE /api/notion/<pageId>` archives a CRM row.
@@ -134,8 +140,8 @@ delay between sequential requests.
       layout.tsx, globals.css
     lib/
       auth.ts    HMAC session cookie (Web Crypto, runs on Edge)
-      bde.ts    BdE client + normaliser (incl. fechaBajaRol → inactive)
-      notion.ts  Notion client (list / create + Provincia prop / archive)
+      bde.ts    BdE client + normaliser (fechaBajaRol → inactive, paginaWeb → URL)
+      notion.ts  Notion client (list / create + Provincia & Web props / archive)
     scripts/
       scrape-intermediarios.mjs     bulk per-province scraper (see above)
     middleware.ts                   gates everything behind the cookie

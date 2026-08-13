@@ -98,43 +98,66 @@ export async function listCrm(limit = 100): Promise<CrmRow[]> {
   return rows;
 }
 
-// Name of the structured CRM property that holds the BdE province. Kept as a
-// Select so the CRM can filter/group prospects by province (e.g. "show me all
-// Madrid prospects"). Notion auto-creates the option the first time a value is
-// written, so we don't need to predefine the list.
+// Structured CRM properties we create on demand, on top of whatever the
+// database already had. "Provincia" is a Select so the CRM can filter/group
+// prospects by province (Notion auto-creates the option the first time a value
+// is written); "Web" is a URL so the company site is one click away from the
+// row instead of only living in the page body.
 const PROVINCIA_PROP = "Provincia";
+const WEB_PROP = "Web";
+const MANAGED_PROPS: Record<string, unknown> = {
+  [PROVINCIA_PROP]: { select: {} },
+  [WEB_PROP]: { url: {} },
+};
 
-// Resolves once we know the Provincia property exists on the data source:
-// `true`  → safe to set it on new pages.
-// `false` → schema couldn't be updated; skip it so page creation still works.
-let provinciaPropReady: Promise<boolean> | null = null;
+// Resolves to the subset of MANAGED_PROPS that exists on the data source and
+// is therefore safe to set on new pages.
+let managedPropsReady: Promise<Set<string>> | null = null;
 
-// Idempotently ensure the data source has a "Provincia" Select property.
-// Notion's data source schema API (2025-09-03) lets us add a property without
-// touching existing rows. Cached for the life of the server process. If the
-// integration lacks "update database" permission, we degrade gracefully:
-// the prospect is still created, just without the structured province.
-async function ensureProvinciaProperty(): Promise<boolean> {
-  if (!provinciaPropReady) {
-    provinciaPropReady = (async () => {
+// Idempotently ensure the data source carries MANAGED_PROPS. Notion's data
+// source schema API (2025-09-03) lets us add properties without touching
+// existing rows, and missing ones go in a single PATCH. Cached for the life of
+// the server process. If the integration lacks "update database" permission we
+// degrade gracefully: the prospect is still created, just without whichever
+// properties we couldn't add.
+async function ensureManagedProperties(): Promise<Set<string>> {
+  if (!managedPropsReady) {
+    managedPropsReady = (async () => {
+      const names = Object.keys(MANAGED_PROPS);
+      let present: string[];
       try {
         const ds = await notionFetch(`/data_sources/${DATA_SOURCE_ID}`);
-        if (ds?.properties?.[PROVINCIA_PROP]) return true;
-        await notionFetch(`/data_sources/${DATA_SOURCE_ID}`, {
-          method: "PATCH",
-          body: { properties: { [PROVINCIA_PROP]: { select: {} } } },
-        });
-        return true;
+        present = names.filter((n) => ds?.properties?.[n]);
       } catch (e) {
         console.warn(
-          `Notion: could not ensure "${PROVINCIA_PROP}" property; ` +
-            `prospects will be created without it. ${(e as Error).message}`,
+          `Notion: could not read the data source schema; prospects will be ` +
+            `created without ${names.join("/")}. ${(e as Error).message}`,
         );
-        return false;
+        return new Set<string>();
       }
+      const missing = names.filter((n) => !present.includes(n));
+      if (missing.length) {
+        try {
+          await notionFetch(`/data_sources/${DATA_SOURCE_ID}`, {
+            method: "PATCH",
+            body: {
+              properties: Object.fromEntries(
+                missing.map((n) => [n, MANAGED_PROPS[n]]),
+              ),
+            },
+          });
+          present = names;
+        } catch (e) {
+          console.warn(
+            `Notion: could not add the "${missing.join('"/"')}" property; ` +
+              `prospects will be created without it. ${(e as Error).message}`,
+          );
+        }
+      }
+      return new Set(present);
     })();
   }
-  return provinciaPropReady;
+  return managedPropsReady;
 }
 
 function paragraph(content: string) {
@@ -163,7 +186,7 @@ function bodyBlocksFor(ent: NormalizedEntity) {
   for (const r of ent.roles) blocks.push(paragraph(`Rol: ${r}`));
   if (ent.administradores.length)
     blocks.push(paragraph(`Administrador(es): ${ent.administradores.join(", ")}`));
-  for (const w of ent.websites) blocks.push(bookmark(w));
+  for (const w of ent.websiteUrls) blocks.push(bookmark(w));
   blocks.push(bookmark(ent.detalleUrl));
   return blocks;
 }
@@ -198,8 +221,14 @@ export async function createProspect(ent: NormalizedEntity): Promise<{
   if (ent.primaryPhone) {
     properties["Teléfono"] = { phone_number: ent.primaryPhone };
   }
-  if (ent.provincia && (await ensureProvinciaProperty())) {
-    properties[PROVINCIA_PROP] = { select: { name: ent.provincia } };
+  if (ent.provincia || ent.primaryWebsite) {
+    const ready = await ensureManagedProperties();
+    if (ent.provincia && ready.has(PROVINCIA_PROP)) {
+      properties[PROVINCIA_PROP] = { select: { name: ent.provincia } };
+    }
+    if (ent.primaryWebsite && ready.has(WEB_PROP)) {
+      properties[WEB_PROP] = { url: ent.primaryWebsite };
+    }
   }
 
   const created = await notionFetch(`/pages`, {

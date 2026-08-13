@@ -128,6 +128,30 @@ export async function fetchBdeDetail(id: number): Promise<BdeDetail> {
   return bdeFetch(`/elementos/${id}?lang=ES`);
 }
 
+/**
+ * BdE stores `paginaWeb` as free text: "www.foo.es", "http://foo.es",
+ * "foo.es bar.es", "no tiene"… Turn one entry into an absolute URL that
+ * Notion accepts (url property / bookmark block), or null when it doesn't
+ * look like a web address at all.
+ */
+export function normalizeWebsite(raw: string | null | undefined): string | null {
+  // Multiple sites are sometimes crammed into one field; keep the first.
+  const s = (raw ?? "").trim().split(/[\s;|]+/)[0]?.replace(/[.,]+$/, "") ?? "";
+  if (!s) return null;
+  let u: URL;
+  try {
+    u = new URL(/^https?:\/\//i.test(s) ? s : `https://${s}`);
+  } catch {
+    return null;
+  }
+  // Guard against non-addresses that still parse: bare words ("no", "-"),
+  // and e-mails, which look like userinfo ("correo@foo.es" → correo@ + foo.es).
+  if (u.username || u.password) return null;
+  if (!/^[a-z0-9-]+(\.[a-z0-9-]+)*\.[a-z]{2,}$/i.test(u.hostname)) return null;
+  const url = u.toString();
+  return u.pathname === "/" && !u.search && !u.hash ? url.slice(0, -1) : url;
+}
+
 export type NormalizedEntity = {
   idelemento: number;
   nombre: string;
@@ -141,7 +165,11 @@ export type NormalizedEntity = {
   inactiveRoles: { nombreRol: string; fechaBajaRol: string }[];
   inactive: boolean | null;
   bajaDate: string | null;
+  /** As registered at BdE, may lack a scheme. Shown in the UI as-is. */
   websites: string[];
+  /** `websites` normalised to absolute URLs, unusable entries dropped. */
+  websiteUrls: string[];
+  primaryWebsite: string | null;
   phones: string[];
   primaryPhone: string | null;
   administradores: string[];
@@ -205,6 +233,12 @@ export function normalizeDetail(d: BdeDetail): NormalizedEntity {
     .map((a) => a.nombreAdministrador)
     .filter(Boolean) as string[];
 
+  const websiteUrls: string[] = [];
+  for (const w of websites) {
+    const u = normalizeWebsite(w);
+    if (u && !websiteUrls.includes(u)) websiteUrls.push(u);
+  }
+
   return {
     idelemento: d.idelemento,
     nombre: (d.nombre ?? "").trim(),
@@ -219,6 +253,8 @@ export function normalizeDetail(d: BdeDetail): NormalizedEntity {
     inactive: isInactive(rolesRaw),
     bajaDate: latestBajaRol(rolesRaw),
     websites,
+    websiteUrls,
+    primaryWebsite: websiteUrls[0] ?? null,
     phones,
     primaryPhone: phones[0] ?? null,
     administradores,
